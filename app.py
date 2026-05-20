@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
 import plotly.express as px
 import gspread
@@ -77,10 +78,16 @@ def load_inbody_data():
         cols[0] = '指標'
         cols[1] = '測定日'
         df_data.columns = cols
-        df_data['指標'] = df_data['指標'].ffill()
+        
+        # 13行ごとに指標のブロックを形成しているので、空行によるズレを防ぐためブロック単位で補完
+        df_data['block'] = np.arange(len(df_data)) // 13
+        df_data['指標'] = df_data.groupby('block')['指標'].transform(lambda x: x.ffill().bfill())
+        df_data['指標'] = df_data['指標'].str.strip() # 空白除去
+        
         df_data = df_data.dropna(subset=['測定日'])
         athlete_cols = [col for col in cols[2:col_end] if pd.notna(col) and str(col).strip() != '']
         df_data = df_data.loc[:, ~df_data.columns.duplicated()]
+        
         melted = pd.melt(df_data, id_vars=['指標', '測定日'], value_vars=athlete_cols, var_name='氏名', value_name='値')
         melted = melted.dropna(subset=['値'])
         melted['値'] = pd.to_numeric(melted['値'], errors='coerce')
@@ -105,9 +112,9 @@ if latest_sheet:
 else:
     players_df = pd.DataFrame(columns=['氏名', '学年'])
 
-if players_df.empty:
-    st.warning("選手データが見つかりません。")
-    st.stop()
+if not inbody_df.empty and not players_df.empty:
+    inbody_df = pd.merge(inbody_df, players_df, on='氏名', how='left')
+    inbody_df['学年'] = inbody_df['学年'].fillna('OG/その他')
 
 # -----------------------------------------------------------------------------
 # Sidebar Configuration
@@ -130,7 +137,8 @@ view_mode = st.sidebar.radio("表示モードを選択", [
     "グループ比較 (学年別リスト・ソート)", 
     "チーム全体の推移 (時系列)",
     "【InBody】個人推移",
-    "【InBody】グループ比較"
+    "【InBody】グループ比較",
+    "【InBody】チーム推移"
 ])
 
 if view_mode == "個人詳細 (各選手のページ)":
@@ -315,9 +323,46 @@ elif view_mode == "【InBody】グループ比較":
             fig.update_traces(marker_color='#27AE60', textposition='outside')
             st.plotly_chart(fig, use_container_width=True)
             
-            st.dataframe(date_df[['氏名', '値']].rename(columns={'値': target_metric}), hide_index=True)
+            st.dataframe(date_df[['氏名', '学年', '値']].rename(columns={'値': target_metric}), hide_index=True)
         else:
             st.info("指定された条件のデータがありません。")
+
+elif view_mode == "【InBody】チーム推移":
+    st.header("📈 【InBody】チーム推移 (平均値)")
+    if inbody_df.empty:
+        st.warning("InBodyデータが読み込めません。")
+    else:
+        target_group = st.radio("集計対象を選択", ["全員", "身体づくり対象者（2〜4年）"], horizontal=True)
+        
+        if target_group == "身体づくり対象者（2〜4年）":
+            trend_df = inbody_df[inbody_df['学年'].isin(['2年', '3年', '4年'])].copy()
+        else:
+            trend_df = inbody_df.copy()
+            
+        st.markdown(f"**対象人数**: 約 {trend_df['氏名'].nunique()} 名")
+        
+        metrics = trend_df['指標'].unique()
+        selected_metrics = st.multiselect("表示する指標を選択", metrics, default=[m for m in ['体重 (kg)', '骨格筋量 (kg)', '体脂肪率 (%)'] if m in metrics])
+        
+        if selected_metrics:
+            for metric in selected_metrics:
+                metric_df = trend_df[trend_df['指標'] == metric]
+                # 月ごとの平均値を算出
+                avg_df = metric_df.groupby('測定日')['値'].mean().reset_index()
+                
+                # '測定日' が文字列 (例: '26/3') のため、そのままプロットすると順序が保証されない場合があるが、
+                # 元データの出現順を尊重するため、unique() の順序を使用
+                date_order = metric_df['測定日'].unique().tolist()
+                avg_df['測定日'] = pd.Categorical(avg_df['測定日'], categories=date_order, ordered=True)
+                avg_df = avg_df.sort_values('測定日')
+                
+                fig = px.line(
+                    avg_df, x='測定日', y='値',
+                    title=f"📈 {metric} (チーム平均)", markers=True, text=avg_df['値'].apply(lambda x: f"{float(x):.1f}"),
+                    template=theme_template, height=300
+                )
+                fig.update_traces(line_color='#E67E22', marker_color='#E67E22', textposition='top center')
+                st.plotly_chart(fig, use_container_width=True)
 
 elif view_mode == "グループ比較 (学年別リスト・ソート)":
     st.header("👥 グループ比較・ソート機能")
