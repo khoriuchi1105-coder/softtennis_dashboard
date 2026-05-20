@@ -113,8 +113,13 @@ else:
     players_df = pd.DataFrame(columns=['氏名', '学年'])
 
 if not inbody_df.empty and not players_df.empty:
-    inbody_df = pd.merge(inbody_df, players_df, on='氏名', how='left')
+    inbody_df['氏名_norm'] = inbody_df['氏名'].astype(str).str.replace(r'\s+', '', regex=True)
+    players_df_merge = players_df.copy()
+    players_df_merge['氏名_norm'] = players_df_merge['氏名'].astype(str).str.replace(r'\s+', '', regex=True)
+    
+    inbody_df = pd.merge(inbody_df, players_df_merge[['氏名_norm', '学年']], on='氏名_norm', how='left')
     inbody_df['学年'] = inbody_df['学年'].fillna('OG/その他')
+    inbody_df = inbody_df.drop(columns=['氏名_norm'])
 
 # -----------------------------------------------------------------------------
 # Sidebar Configuration
