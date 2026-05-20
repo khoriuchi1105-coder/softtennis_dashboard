@@ -340,7 +340,8 @@ elif view_mode == "【InBody】チーム推移":
         target_group = st.radio("集計対象を選択", ["全員", "身体づくり対象者（2〜4年）"], horizontal=True)
         
         if target_group == "身体づくり対象者（2〜4年）":
-            trend_df = inbody_df[inbody_df['学年'].isin(['2年', '3年', '4年'])].copy()
+            target_grades = ['2年', '3年', '4年', '2', '3', '4']
+            trend_df = inbody_df[inbody_df['学年'].astype(str).isin(target_grades)].copy()
         else:
             trend_df = inbody_df.copy()
             
