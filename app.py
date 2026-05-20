@@ -7,6 +7,28 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 st.set_page_config(page_title="ソフトテニス部 ダッシュボード", layout="wide")
 
+def check_password():
+    """Returns `True` if the user had the correct password."""
+    def password_entered():
+        # Check against the password stored in secrets.toml
+        if st.session_state["password"] == st.secrets.get("password", "nssu2026"):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input("閲覧用パスワードを入力してください", type="password", on_change=password_entered, key="password")
+        return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("閲覧用パスワードを入力してください", type="password", on_change=password_entered, key="password")
+        st.error("😕 パスワードが間違っています")
+        return False
+    return True
+
+if not check_password():
+    st.stop()
+
 st.title("🎾 ソフトテニス部 体力測定ダッシュボード")
 st.markdown("体力測定結果の推移と、チーム全体でのグループ比較を確認できます。\n**Googleスプレッドシート** に入力されたデータがオンラインで自動反映されます。")
 
@@ -41,11 +63,38 @@ def load_unified_data_from_gs():
         st.error(f"スプレッドシート読み込みエラー: {e}")
         return {}
 
+@st.cache_data
+def load_inbody_data():
+    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "日体大女子2026inbody.xlsx")
+    if not os.path.exists(filepath):
+        return pd.DataFrame()
+    try:
+        df_raw = pd.read_excel(filepath, sheet_name=0, header=None)
+        names_row = df_raw.iloc[1].tolist()
+        col_end = names_row.index('平均') if '平均' in names_row else len(names_row)
+        df_data = df_raw.iloc[2:].copy()
+        cols = list(names_row)
+        cols[0] = '指標'
+        cols[1] = '測定日'
+        df_data.columns = cols
+        df_data['指標'] = df_data['指標'].ffill()
+        df_data = df_data.dropna(subset=['測定日'])
+        athlete_cols = [col for col in cols[2:col_end] if pd.notna(col) and str(col).strip() != '']
+        df_data = df_data.loc[:, ~df_data.columns.duplicated()]
+        melted = pd.melt(df_data, id_vars=['指標', '測定日'], value_vars=athlete_cols, var_name='氏名', value_name='値')
+        melted = melted.dropna(subset=['値'])
+        melted['値'] = pd.to_numeric(melted['値'], errors='coerce')
+        return melted.dropna(subset=['値'])
+    except Exception as e:
+        st.error(f"InBodyファイルの読み込みエラー: {e}")
+        return pd.DataFrame()
+
 # -----------------------------------------------------------------------------
 # Data Initialization
 # -----------------------------------------------------------------------------
 with st.spinner("クラウドからデータを取得しています..."):
     fitness_data_dict = load_unified_data_from_gs()
+    inbody_df = load_inbody_data()
 
 # サイドバーの学年フィルタ用（「現在の学年」とするため、一番最後に作成されたシート（最新）を基準にする）
 latest_sheet = list(fitness_data_dict.keys())[-1] if fitness_data_dict else None
@@ -76,7 +125,13 @@ theme_template = 'plotly_white'
 bar_color = '#2E86C1'
 
 st.sidebar.markdown("---")
-view_mode = st.sidebar.radio("表示モードを選択", ["個人詳細 (各選手のページ)", "グループ比較 (学年別リスト・ソート)", "チーム全体の推移 (時系列)"])
+view_mode = st.sidebar.radio("表示モードを選択", [
+    "個人詳細 (各選手のページ)", 
+    "グループ比較 (学年別リスト・ソート)", 
+    "チーム全体の推移 (時系列)",
+    "【InBody】個人推移",
+    "【InBody】グループ比較"
+])
 
 if view_mode == "個人詳細 (各選手のページ)":
     st.sidebar.subheader("絞り込み")
@@ -206,6 +261,63 @@ if view_mode == "個人詳細 (各選手のページ)":
                     t_idx += 1
     else:
         st.warning("体力測定データが取得できませんでした。")
+
+# =============================================================================
+# InBody UI Logic
+# =============================================================================
+elif view_mode == "【InBody】個人推移":
+    st.header("💪 【InBody】個人推移")
+    if inbody_df.empty:
+        st.warning("InBodyデータが読み込めません。`日体大女子2026inbody.xlsx` を確認してください。")
+    else:
+        players = sorted(inbody_df['氏名'].unique().tolist())
+        selected_player = st.sidebar.selectbox("👤 選手を選択してください", players)
+        
+        st.subheader(f"{selected_player} 選手のInBody推移")
+        player_inbody = inbody_df[inbody_df['氏名'] == selected_player]
+        
+        metrics = player_inbody['指標'].unique()
+        selected_metrics = st.multiselect("表示する指標を選択", metrics, default=[m for m in ['体重 (kg)', '骨格筋量 (kg)', '体脂肪率 (%)'] if m in metrics])
+        
+        if selected_metrics:
+            for metric in selected_metrics:
+                plot_data = player_inbody[player_inbody['指標'] == metric]
+                fig = px.line(
+                    plot_data, x='測定日', y='値',
+                    title=f"📈 {metric}", markers=True, text=plot_data['値'].apply(lambda x: f"{float(x):.1f}"),
+                    template=theme_template, height=300
+                )
+                fig.update_traces(line_color='#27AE60', marker_color='#27AE60', textposition='top center')
+                st.plotly_chart(fig, use_container_width=True)
+
+elif view_mode == "【InBody】グループ比較":
+    st.header("📊 【InBody】グループ比較")
+    if inbody_df.empty:
+        st.warning("InBodyデータが読み込めません。")
+    else:
+        dates = inbody_df['測定日'].unique().tolist()
+        metrics = inbody_df['指標'].unique().tolist()
+        
+        col1, col2 = st.columns(2)
+        target_date = col1.selectbox("比較する測定時期", dates, index=len(dates)-1)
+        target_metric = col2.selectbox("比較する指標", metrics, index=metrics.index('骨格筋量 (kg)') if '骨格筋量 (kg)' in metrics else 0)
+        
+        date_df = inbody_df[(inbody_df['測定日'] == target_date) & (inbody_df['指標'] == target_metric)].copy()
+        
+        if not date_df.empty:
+            date_df = date_df.sort_values(by='値', ascending=False).reset_index(drop=True)
+            
+            fig = px.bar(
+                date_df, x='氏名', y='値', text=date_df['値'].apply(lambda x: f"{float(x):.1f}"),
+                title=f"{target_date} - {target_metric} ランキング",
+                template=theme_template
+            )
+            fig.update_traces(marker_color='#27AE60', textposition='outside')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.dataframe(date_df[['氏名', '値']].rename(columns={'値': target_metric}), hide_index=True)
+        else:
+            st.info("指定された条件のデータがありません。")
 
 elif view_mode == "グループ比較 (学年別リスト・ソート)":
     st.header("👥 グループ比較・ソート機能")
