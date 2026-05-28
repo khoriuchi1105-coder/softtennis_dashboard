@@ -30,6 +30,22 @@ def check_password():
 if not check_password():
     st.stop()
 
+def check_coach_password():
+    def coach_password_entered():
+        if st.session_state["coach_pwd"] == st.secrets.get("coach_password", "coach2026"):
+            st.session_state["coach_auth"] = True
+            del st.session_state["coach_pwd"]
+        else:
+            st.session_state["coach_auth"] = False
+
+    if "coach_auth" not in st.session_state or not st.session_state["coach_auth"]:
+        st.warning("🔒 個人のInBodyデータ閲覧には、指導者専用パスワードが必要です。")
+        st.text_input("指導者用パスワードを入力", type="password", on_change=coach_password_entered, key="coach_pwd")
+        if st.session_state.get("coach_auth") is False:
+            st.error("😕 パスワードが間違っています")
+        return False
+    return True
+
 st.title("🎾 ソフトテニス部 体力測定ダッシュボード")
 st.markdown("体力測定結果の推移と、チーム全体でのグループ比較を確認できます。\n**Googleスプレッドシート** に入力されたデータがオンラインで自動反映されます。")
 
@@ -66,35 +82,43 @@ def load_unified_data_from_gs():
 
 @st.cache_data
 def load_inbody_data():
-    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "日体大女子2026inbody.xlsx")
-    if not os.path.exists(filepath):
-        return pd.DataFrame()
-    try:
-        df_raw = pd.read_excel(filepath, sheet_name=0, header=None)
-        names_row = df_raw.iloc[1].tolist()
-        col_end = names_row.index('平均') if '平均' in names_row else len(names_row)
-        df_data = df_raw.iloc[2:].copy()
-        cols = list(names_row)
-        cols[0] = '指標'
-        cols[1] = '測定日'
-        df_data.columns = cols
-        
-        # 13行ごとに指標のブロックを形成しているので、空行によるズレを防ぐためブロック単位で補完
-        df_data['block'] = np.arange(len(df_data)) // 13
-        df_data['指標'] = df_data.groupby('block')['指標'].transform(lambda x: x.ffill().bfill())
-        df_data['指標'] = df_data['指標'].str.strip() # 空白除去
-        
-        df_data = df_data.dropna(subset=['測定日'])
-        athlete_cols = [col for col in cols[2:col_end] if pd.notna(col) and str(col).strip() != '']
-        df_data = df_data.loc[:, ~df_data.columns.duplicated()]
-        
-        melted = pd.melt(df_data, id_vars=['指標', '測定日'], value_vars=athlete_cols, var_name='氏名', value_name='値')
-        melted = melted.dropna(subset=['値'])
-        melted['値'] = pd.to_numeric(melted['値'], errors='coerce')
-        return melted.dropna(subset=['値'])
-    except Exception as e:
-        st.error(f"InBodyファイルの読み込みエラー: {e}")
-        return pd.DataFrame()
+    def load_single_file(filepath):
+        if not os.path.exists(filepath):
+            return pd.DataFrame()
+        try:
+            df_raw = pd.read_excel(filepath, sheet_name=0, header=None)
+            names_row = df_raw.iloc[1].tolist()
+            col_end = names_row.index('平均') if '平均' in names_row else len(names_row)
+            df_data = df_raw.iloc[2:].copy()
+            cols = list(names_row)
+            cols[0] = '指標'
+            cols[1] = '測定日'
+            df_data.columns = cols
+            
+            df_data['block'] = np.arange(len(df_data)) // 13
+            df_data['指標'] = df_data.groupby('block')['指標'].transform(lambda x: x.ffill().bfill())
+            df_data['指標'] = df_data['指標'].astype(str).str.strip()
+            
+            df_data = df_data.dropna(subset=['測定日'])
+            athlete_cols = [col for col in cols[2:col_end] if pd.notna(col) and str(col).strip() != '']
+            df_data = df_data.loc[:, ~df_data.columns.duplicated()]
+            
+            melted = pd.melt(df_data, id_vars=['指標', '測定日'], value_vars=athlete_cols, var_name='氏名', value_name='値')
+            melted = melted.dropna(subset=['値'])
+            melted['値'] = pd.to_numeric(melted['値'], errors='coerce')
+            return melted.dropna(subset=['値'])
+        except Exception as e:
+            st.error(f"InBodyファイルの読み込みエラー ({os.path.basename(filepath)}): {e}")
+            return pd.DataFrame()
+
+    dir_path = os.path.dirname(os.path.abspath(__file__))
+    df_2025 = load_single_file(os.path.join(dir_path, "日体大女子2025inbody.xlsx"))
+    df_2026 = load_single_file(os.path.join(dir_path, "日体大女子2026inbody.xlsx"))
+    
+    df_all = pd.concat([df_2025, df_2026], ignore_index=True)
+    if not df_all.empty:
+        df_all = df_all.drop_duplicates(subset=['指標', '測定日', '氏名'])
+    return df_all
 
 # -----------------------------------------------------------------------------
 # Data Initialization
@@ -280,6 +304,8 @@ if view_mode == "個人詳細 (各選手のページ)":
 # =============================================================================
 elif view_mode == "【InBody】個人推移":
     st.header("💪 【InBody】個人推移")
+    if not check_coach_password():
+        st.stop()
     if inbody_df.empty:
         st.warning("InBodyデータが読み込めません。`日体大女子2026inbody.xlsx` を確認してください。")
     else:
@@ -305,6 +331,8 @@ elif view_mode == "【InBody】個人推移":
 
 elif view_mode == "【InBody】グループ比較":
     st.header("📊 【InBody】グループ比較")
+    if not check_coach_password():
+        st.stop()
     if inbody_df.empty:
         st.warning("InBodyデータが読み込めません。")
     else:
