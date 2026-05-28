@@ -118,6 +118,21 @@ def load_inbody_data():
     df_all = pd.concat([df_2025, df_2026], ignore_index=True)
     if not df_all.empty:
         df_all = df_all.drop_duplicates(subset=['指標', '測定日', '氏名'])
+        
+        # 測定日の表記ゆれ修正
+        df_all['測定日'] = df_all['測定日'].astype(str).str.strip().replace('2512', '25/12')
+        
+        # 時系列順 (YY/MM) にソートするためのキー関数
+        def sort_key(d):
+            parts = d.split('/')
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                return int(parts[0]) * 100 + int(parts[1])
+            return 9999
+            
+        date_order = sorted(df_all['測定日'].unique(), key=sort_key)
+        df_all['測定日'] = pd.Categorical(df_all['測定日'], categories=date_order, ordered=True)
+        df_all = df_all.sort_values(['測定日', '氏名', '指標'])
+        
     return df_all
 
 # -----------------------------------------------------------------------------
@@ -384,10 +399,8 @@ elif view_mode == "【InBody】チーム推移":
                 # 月ごとの平均値を算出
                 avg_df = metric_df.groupby('測定日')['値'].mean().reset_index()
                 
-                # '測定日' が文字列 (例: '26/3') のため、そのままプロットすると順序が保証されない場合があるが、
-                # 元データの出現順を尊重するため、unique() の順序を使用
-                date_order = metric_df['測定日'].unique().tolist()
-                avg_df['測定日'] = pd.Categorical(avg_df['測定日'], categories=date_order, ordered=True)
+                # 測定日は load_inbody_data() 側で正しい順序のCategorical型に設定済みのため
+                # ここでは単純にソートするだけで時系列順になる
                 avg_df = avg_df.sort_values('測定日')
                 
                 fig = px.line(
